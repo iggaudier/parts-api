@@ -21,8 +21,8 @@ class SystemPartController extends Controller
         $query = SystemPart::query();
 
         // Filters
-        if ($request->has('is_active')) {
-            $query->where('is_active', $request->boolean('is_active'));
+        if (in_array($request->is_active, ['0', '1', 0, 1], true)) {
+            $query->where('is_active', (bool) $request->is_active);
         }
 
         if ($request->has('part_type')) {
