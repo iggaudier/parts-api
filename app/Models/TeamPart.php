@@ -14,7 +14,7 @@ class TeamPart extends Model
         'system_part_id',
         'multiplier',
         'static_price',
-        'team_price',
+        'team_price', // MUST be provided explicitly
     ];
 
     protected $casts = [
@@ -32,45 +32,5 @@ class TeamPart extends Model
     public function systemPart()
     {
         return $this->belongsTo(SystemPart::class);
-    }
-
-    // Calculate team price based on multiplier or static price
-    public static function calculateTeamPrice($listPrice, $multiplier = null, $staticPrice = null)
-    {
-        if ($staticPrice !== null) {
-            return $staticPrice;
-        }
-
-        if ($multiplier !== null) {
-            return round($listPrice * $multiplier, 2);
-        }
-
-        return $listPrice;
-    }
-
-    // Observer to auto-calculate team_price
-    protected static function boot()
-    {
-        parent::boot();
-
-        static::creating(function ($teamPart) {
-            if ($teamPart->systemPart) {
-                $teamPart->team_price = self::calculateTeamPrice(
-                    $teamPart->systemPart->list_price,
-                    $teamPart->multiplier,
-                    $teamPart->static_price
-                );
-            }
-        });
-
-        static::updating(function ($teamPart) {
-            if ($teamPart->systemPart) {
-                $teamPart->team_price = self::calculateTeamPrice(
-                    $teamPart->systemPart->list_price,
-                    $teamPart->multiplier,
-                    $teamPart->static_price
-                );
-            }
-        });
     }
 }

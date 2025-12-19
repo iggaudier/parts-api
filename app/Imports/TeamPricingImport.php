@@ -2,73 +2,174 @@
 
 namespace App\Imports;
 
-use App\Models\SystemPart;
-use App\Models\TeamPart;
-use Maatwebsite\Excel\Concerns\SkipsErrors;
-use Maatwebsite\Excel\Concerns\SkipsOnError;
-use Maatwebsite\Excel\Concerns\ToModel;
-use Maatwebsite\Excel\Concerns\WithBatchInserts;
-use Maatwebsite\Excel\Concerns\WithChunkReading;
-use Maatwebsite\Excel\Concerns\WithHeadingRow;
-use Maatwebsite\Excel\Concerns\WithValidation;
+use Illuminate\Support\Facades\DB;
+use League\Csv\Reader;
 
-class TeamPricingImport implements SkipsOnError, ToModel, WithBatchInserts, WithChunkReading, WithHeadingRow, WithValidation
+class TeamPricingImport
 {
-    use SkipsErrors;
+    protected int $teamId;
 
-    protected $teamId;
+    protected int $batchSize = 1000;
 
-    public function __construct($teamId)
+    /** @var array<string,int> */
+    protected array $systemPartMap = [];
+
+    /** @var array<string,bool> */
+    protected array $existingTeamParts = [];
+
+    public function __construct(int $teamId)
     {
         $this->teamId = $teamId;
+        $this->buildSystemPartMap();
+        $this->buildExistingTeamPartsMap();
     }
 
-    public function model(array $row)
+    public function import(string $path): array
     {
-        // Find the system part
-        $systemPart = SystemPart::where('manufacturer', $row['manufacturer'])
-            ->where('model_number', $row['model_number'])
-            ->first();
+        $csv = Reader::createFromPath($path, 'r');
+        $csv->setDelimiter($this->detectDelimiter($path));
+        $csv->setHeaderOffset(0);
 
-        if (! $systemPart) {
-            return null;
+        $records = $csv->getRecords();
+        $batch = [];
+        $errors = [];
+
+        foreach ($records as $index => $row) {
+            try {
+                $row = array_change_key_case($row, CASE_LOWER);
+
+                if (empty(array_filter($row))) {
+                    continue;
+                }
+
+                $manufacturer = $this->normalize($row['manufacturer'] ?? '');
+                $modelNumber = $this->normalize(
+                    $row['model number']
+                    ?? $row['model_number']
+                    ?? ''
+                );
+
+                if ($manufacturer === '' || $modelNumber === '') {
+                    throw new \Exception('Missing manufacturer or model number');
+                }
+
+                $key = "{$manufacturer}|{$modelNumber}";
+
+                if (! isset($this->systemPartMap[$key])) {
+                    throw new \Exception('System part not found');
+                }
+
+                $systemPartId = $this->systemPartMap[$key];
+
+                // Prevent duplicates
+                $teamKey = "{$this->teamId}|{$systemPartId}";
+                if (isset($this->existingTeamParts[$teamKey])) {
+                    continue;
+                }
+
+                $listPrice = DB::table('system_parts')
+                    ->where('id', $systemPartId)
+                    ->value('list_price');
+
+                if ($listPrice === null) {
+                    throw new \Exception('List price not found');
+                }
+
+                $multiplier = isset($row['multiplier']) && $row['multiplier'] !== ''
+                    ? (float) $row['multiplier']
+                    : null;
+
+                $staticPrice = isset($row['static price']) && $row['static price'] !== ''
+                    ? (float) $row['static price']
+                    : null;
+
+                if ($multiplier === null && $staticPrice === null) {
+                    throw new \Exception('Multiplier or static price required');
+                }
+
+                $teamPrice = $staticPrice !== null
+                    ? $staticPrice
+                    : round($listPrice * $multiplier, 2);
+
+                $batch[] = [
+                    'team_id' => $this->teamId,
+                    'system_part_id' => $systemPartId,
+                    'multiplier' => $multiplier,
+                    'static_price' => $staticPrice,
+                    'team_price' => $teamPrice,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+
+                $this->existingTeamParts[$teamKey] = true;
+
+                if (count($batch) >= $this->batchSize) {
+                    DB::table('team_parts')->insert($batch);
+                    $batch = [];
+                }
+
+            } catch (\Throwable $e) {
+                $errors[] = [
+                    'row' => $index + 2,
+                    'error' => $e->getMessage(),
+                    'data' => $row,
+                ];
+            }
         }
 
-        // Prefer multiplier over static_price
-        $multiplier = isset($row['multiplier']) && $row['multiplier'] !== '' ? $row['multiplier'] : null;
-        $staticPrice = isset($row['static_price']) && $row['static_price'] !== '' ? $row['static_price'] : null;
-
-        if ($multiplier !== null && $staticPrice !== null) {
-            $staticPrice = null; // Use multiplier
+        if (! empty($batch)) {
+            DB::table('team_parts')->insert($batch);
         }
 
-        return TeamPart::updateOrCreate(
-            [
-                'team_id' => $this->teamId,
-                'system_part_id' => $systemPart->id,
-            ],
-            [
-                'multiplier' => $multiplier,
-                'static_price' => $staticPrice,
-            ]
-        );
+        return $errors;
     }
 
-    public function rules(): array
+    protected function buildSystemPartMap(): void
     {
-        return [
-            'manufacturer' => 'required|string',
-            'model_number' => 'required|string',
-        ];
+        DB::table('system_parts')
+            ->select('id', 'manufacturer', 'model_number')
+            ->orderBy('id')
+            ->chunk(1000, function ($rows) {
+                foreach ($rows as $row) {
+                    $key = $this->normalize($row->manufacturer)
+                        .'|'
+                        .$this->normalize($row->model_number);
+
+                    $this->systemPartMap[$key] = $row->id;
+                }
+            });
     }
 
-    public function batchSize(): int
+    protected function buildExistingTeamPartsMap(): void
     {
-        return 500;
+        DB::table('team_parts')
+            ->where('team_id', $this->teamId)
+            ->orderBy('id')
+            ->select('team_id', 'system_part_id')
+            ->chunk(1000, function ($rows) {
+                foreach ($rows as $row) {
+                    $this->existingTeamParts[
+                        "{$row->team_id}|{$row->system_part_id}"
+                    ] = true;
+                }
+            });
     }
 
-    public function chunkSize(): int
+    protected function normalize(string $value): string
     {
-        return 500;
+        return strtolower(trim($value));
+    }
+
+    protected function detectDelimiter(string $path): string
+    {
+        $line = fgets(fopen($path, 'r')) ?: '';
+
+        foreach ([',', ';', "\t", '|'] as $delimiter) {
+            if (substr_count($line, $delimiter) > 1) {
+                return $delimiter;
+            }
+        }
+
+        return ',';
     }
 }

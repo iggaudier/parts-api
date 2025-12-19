@@ -15,36 +15,29 @@ class ImportExportController extends Controller
     // Import System Parts
     public function importSystemParts(Request $request)
     {
-        // Only System Admins can import
         if (! $request->user()->isSystemAdmin()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Unauthorized',
-            ], 403);
+            return response()->json(['message' => 'Unauthorized'], 403);
         }
 
         $request->validate([
-            'file' => 'required|file|mimes:xlsx,xls,csv',
+            'file' => 'required|file|mimes:csv',
         ]);
 
         try {
-            $import = new SystemPartsImport;
-            Excel::import($import, $request->file('file'));
-
-            $errors = $import->errors();
-            $errorCount = count($errors);
+            $importer = new SystemPartsImport;
+            $errors = $importer->import($request->file('file')->getRealPath());
 
             return response()->json([
                 'success' => true,
-                'message' => $errorCount > 0
-                    ? "Import completed with {$errorCount} errors"
+                'message' => count($errors)
+                    ? 'Import completed with errors'
                     : 'System parts imported successfully',
-                'errors' => $errorCount > 0 ? $errors : null,
+                'errors' => $errors ?: null,
             ]);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Import failed: '.$e->getMessage(),
+                'message' => $e->getMessage(),
             ], 500);
         }
     }
@@ -91,13 +84,13 @@ class ImportExportController extends Controller
             ], 403);
         }
 
-        $request->validate([
-            'file' => 'required|file|mimes:xlsx,xls,csv',
+        $validated = $request->validate([
+            'file' => 'required|file|mimes:csv',
             'team_id' => 'required|exists:teams,id',
         ]);
 
-        // Team Admins can only import for their team
-        if ($user->isTeamAdmin() && $user->team_id != $request->team_id) {
+        // Team Admins can only import for their own team
+        if ($user->isTeamAdmin() && $user->team_id != $validated['team_id']) {
             return response()->json([
                 'success' => false,
                 'message' => 'You can only import pricing for your own team',
@@ -105,23 +98,23 @@ class ImportExportController extends Controller
         }
 
         try {
-            $import = new TeamPricingImport($request->team_id);
-            Excel::import($import, $request->file('file'));
-
-            $errors = $import->errors();
-            $errorCount = count($errors);
+            $importer = new TeamPricingImport((int) $validated['team_id']);
+            $errors = $importer->import(
+                $validated['file']->getRealPath()
+            );
 
             return response()->json([
                 'success' => true,
-                'message' => $errorCount > 0
-                    ? "Import completed with {$errorCount} errors"
+                'message' => count($errors)
+                    ? 'Import completed with errors'
                     : 'Team pricing imported successfully',
-                'errors' => $errorCount > 0 ? $errors : null,
+                'errors' => count($errors) ? $errors : null,
             ]);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Import failed: '.$e->getMessage(),
+                'message' => 'Import failed',
+                'error' => $e->getMessage(),
             ], 500);
         }
     }

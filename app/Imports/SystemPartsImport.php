@@ -2,54 +2,102 @@
 
 namespace App\Imports;
 
-use App\Models\SystemPart;
-use Maatwebsite\Excel\Concerns\SkipsErrors;
-use Maatwebsite\Excel\Concerns\SkipsOnError;
-use Maatwebsite\Excel\Concerns\ToModel;
-use Maatwebsite\Excel\Concerns\WithBatchInserts;
-use Maatwebsite\Excel\Concerns\WithChunkReading;
-use Maatwebsite\Excel\Concerns\WithHeadingRow;
-use Maatwebsite\Excel\Concerns\WithValidation;
+use Illuminate\Support\Facades\DB;
+use League\Csv\Reader;
 
-class SystemPartsImport implements SkipsOnError, ToModel, WithBatchInserts, WithChunkReading, WithHeadingRow, WithValidation
+class SystemPartsImport
 {
-    use SkipsErrors;
+    protected int $batchSize = 1000;
 
-    public function model(array $row)
+    public function import(string $path): array
     {
-        // Update if exists, create if not
-        return SystemPart::updateOrCreate(
-            [
-                'manufacturer' => $row['manufacturer'],
-                'model_number' => $row['model_number'],
-            ],
-            [
-                'part_type' => $row['part_type'],
-                'list_price' => $row['list_price'],
-                'is_active' => $row['active'] ?? true,
-            ]
-        );
+        $csv = Reader::createFromPath($path, 'r');
+        $csv->setDelimiter($this->detectDelimiter($path));
+        $csv->setHeaderOffset(0);
+
+        $records = $csv->getRecords();
+
+        $batch = [];
+        $errors = [];
+
+        foreach ($records as $index => $row) {
+            try {
+                // Normalize keys
+                $row = array_change_key_case($row, CASE_LOWER);
+
+                // Skip empty rows
+                if (empty(array_filter($row))) {
+                    continue;
+                }
+
+                $manufacturer = trim($row['manufacturer'] ?? '');
+                $modelNumber = trim($row['model number'] ?? $row['model_number'] ?? '');
+                $partType = trim($row['part type'] ?? $row['part_type'] ?? '');
+                $priceRaw = trim($row['list price'] ?? $row['list_price'] ?? '');
+
+                if ($manufacturer === '') {
+                    throw new \Exception('Missing manufacturer');
+                }
+                if ($modelNumber === '') {
+                    throw new \Exception('Missing model_number');
+                }
+                if ($partType === '') {
+                    throw new \Exception('Missing part_type');
+                }
+
+                $price = preg_replace('/[^\d.]/', '', $priceRaw);
+                if ($price === '' || ! is_numeric($price)) {
+                    throw new \Exception('Invalid list_price');
+                }
+
+                $activeRaw = strtoupper(trim($row['active'] ?? 'Y'));
+                $isActive = in_array($activeRaw, ['Y', 'YES', '1', 'TRUE'], true);
+
+                $batch[] = [
+                    'manufacturer' => $manufacturer,
+                    'model_number' => $modelNumber,
+                    'part_type' => $partType,
+                    'list_price' => (float) $price,
+                    'is_active' => $isActive,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+
+                if (count($batch) >= $this->batchSize) {
+                    $this->insert($batch);
+                    $batch = [];
+                }
+            } catch (\Throwable $e) {
+                $errors[] = [
+                    'row' => $index + 2,
+                    'error' => $e->getMessage(),
+                    'data' => $row,
+                ];
+            }
+        }
+
+        if (! empty($batch)) {
+            $this->insert($batch);
+        }
+
+        return $errors;
     }
 
-    public function rules(): array
+    protected function insert(array $rows): void
     {
-        return [
-            'part_type' => 'required|string',
-            'manufacturer' => 'required|string',
-            'model_number' => 'required|string',
-            'list_price' => 'required|numeric|min:0',
-        ];
+        DB::table('system_parts')->insertOrIgnore($rows);
     }
 
-    // Process in batches for performance
-    public function batchSize(): int
+    protected function detectDelimiter(string $path): string
     {
-        return 500;
-    }
+        $line = fgets(fopen($path, 'r')) ?: '';
 
-    // Read file in chunks for memory efficiency
-    public function chunkSize(): int
-    {
-        return 500;
+        foreach ([',', ';', "\t", '|'] as $delimiter) {
+            if (substr_count($line, $delimiter) > 1) {
+                return $delimiter;
+            }
+        }
+
+        return ',';
     }
 }
