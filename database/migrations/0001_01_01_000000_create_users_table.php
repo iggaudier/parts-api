@@ -18,7 +18,6 @@ return new class extends Migration
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
             $table->enum('role', ['system_admin', 'team_admin', 'team_member'])->default('team_member');
-            $table->foreignId('team_id')->nullable()->constrained()->onDelete('cascade');
             $table->rememberToken();
             $table->timestamps();
         });
